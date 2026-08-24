@@ -31,17 +31,26 @@ BASE_URL = "https://graph.threads.net/v1.0"
 PUBLISH_DELAY_SECONDS = 33
 
 # ---------------------------------------------------------------------------
-# Token helpers
+# Token helpers (cached in a module-level variable for zero-work refresh)
 # ---------------------------------------------------------------------------
+
+_ACTIVE_TOKEN: Optional[str] = None
 
 
 def get_active_token(current_state: Optional[dict] = None) -> str:
-    """Return the best available access token (state cache > env var)."""
+    """Return the best available access token (cached > state cache > env var)."""
+    global _ACTIVE_TOKEN
+    if _ACTIVE_TOKEN:
+        return _ACTIVE_TOKEN
+
+    token = ""
     if current_state:
-        cached = current_state.get("current_token", "")
-        if cached:
-            return cached
-    return os.environ.get("THREADS_ACCESS_TOKEN", "")
+        token = current_state.get("current_token", "")
+    if not token:
+        token = os.environ.get("THREADS_ACCESS_TOKEN", "")
+
+    _ACTIVE_TOKEN = token
+    return token
 
 
 def check_and_refresh_token(current_state: dict) -> None:
@@ -52,6 +61,7 @@ def check_and_refresh_token(current_state: dict) -> None:
     old and returns a new token valid for 60 days. This is called once per
     bot run and silently skips on failure (token may not yet be eligible).
     """
+    # Always resolve using the state file or env at start
     token = get_active_token(current_state)
     if not token:
         logger.warning("No access token available -- skipping refresh check.")
@@ -68,6 +78,8 @@ def check_and_refresh_token(current_state: dict) -> None:
             new_token = resp.json().get("access_token", "")
             if new_token and new_token != token:
                 logger.info("Access token refreshed successfully.")
+                global _ACTIVE_TOKEN
+                _ACTIVE_TOKEN = new_token
                 _state.set_active_token(current_state, new_token)
             else:
                 logger.info("Token refresh returned same token -- still valid.")
