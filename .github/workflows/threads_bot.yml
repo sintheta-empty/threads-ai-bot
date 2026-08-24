@@ -1,0 +1,88 @@
+﻿# .github/workflows/threads_bot.yml
+# ==================================
+# Automated Meta Threads AI Bot via GitHub Actions
+#
+# Schedule: Runs every 6 hours (adjust cron as needed)
+# Manual:   Can be triggered on-demand via workflow_dispatch
+# State:    Commits updated processed_ids.json back to repo after each run
+
+name: Threads AI Bot
+
+on:
+  schedule:
+    # Runs at 00:00, 06:00, 12:00, 18:00 UTC every day
+    - cron: "0 0,6,12,18 * * *"
+  workflow_dispatch:
+    inputs:
+      debug_mode:
+        description: "Enable verbose debug logging"
+        required: false
+        default: "false"
+        type: boolean
+
+permissions:
+  contents: write  # Required to commit state file back to repo
+
+jobs:
+  run-bot:
+    name: Run Threads AI Bot
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # -----------------------------------------------------------------------
+      # 1. Checkout repository
+      # -----------------------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # -----------------------------------------------------------------------
+      # 2. Set up Python
+      # -----------------------------------------------------------------------
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # -----------------------------------------------------------------------
+      # 3. Install dependencies
+      # -----------------------------------------------------------------------
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # -----------------------------------------------------------------------
+      # 4. Run the bot
+      # -----------------------------------------------------------------------
+      - name: Run Threads AI Bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+          STATE_FILE: processed_ids.json
+        run: |
+          if [ "${{ inputs.debug_mode }}" = "true" ]; then
+            export PYTHONPATH="${PYTHONPATH}:."
+            python -c "import logging; logging.basicConfig(level=logging.DEBUG)"
+          fi
+          python main.py
+
+      # -----------------------------------------------------------------------
+      # 5. Commit updated state file back to repo
+      #    (so processed comment IDs persist across runs)
+      # -----------------------------------------------------------------------
+      - name: Commit updated state file
+        if: always()
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add processed_ids.json
+          if git diff --staged --quiet; then
+            echo "No changes to state file, skipping commit."
+          else
+            git commit -m "chore(bot): update processed_ids.json state [skip ci]"
+            git push
+          fi
