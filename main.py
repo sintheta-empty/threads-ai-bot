@@ -1,18 +1,17 @@
 """
 main.py
 =======
-Orchestrator — wires together the Gemini Brain, Threads Client, and State Manager.
+Orchestrator for the automated Threads AI Bot.
 
 Execution flow:
   1. Load persistent state.
-  2. Randomly pick a post mode (gaming / anime / valorant / image).
-     - Every ~4th run, attempt a quote-post of the last published thread.
-  3. Generate content via Gemini (brain.py).
-  4. Publish to Threads (threads_client.py).
-  5. Process replies on recent posts and auto-reply via Gemini.
-  6. Save updated state back to disk.
-
-In GitHub Actions the state file is committed back to the repo automatically.
+  2. Check/refresh Threads access token.
+  3. Randomly pick a post mode (GAMING / ANIME / VALORANT / IMAGE).
+     - Every ~4th run attempt a quote-post of the last published thread.
+  4. Generate content via Gemini (brain.py).
+  5. Publish to Threads (threads_client.py).
+  6. Process replies on recent posts and auto-reply via Gemini.
+  7. Save updated state back to disk.
 """
 
 import logging
@@ -22,10 +21,10 @@ import sys
 
 from dotenv import load_dotenv
 
-# Load .env for local development (no-op in GitHub Actions where secrets are env vars)
+# Load .env for local development (no-op in GitHub Actions)
 load_dotenv()
 
-from app import brain, threads_client, state
+from app import brain, state, threads_client
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -39,98 +38,76 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 # ---------------------------------------------------------------------------
-# Image hosting helper
-# ---------------------------------------------------------------------------
-
-def _get_image_url_from_prompt(image_prompt: str, theme: str) -> str:
-    """
-    Generate an image URL from a prompt.
-
-    Strategy (in order):
-      1. Use Pollinations.ai (free, no auth needed) for immediate, clean image URLs.
-         URL format: https://image.pollinations.ai/prompt/{url_encoded_prompt}
-      2. Fallback: a public placeholder themed image via picsum.photos.
-
-    Pollinations.ai generates AI images on-the-fly and returns a stable URL
-    that Threads can fetch directly -- no file hosting needed.
-    """
-    import urllib.parse
-
-    # Pollinations.ai: free AI image generation, returns stable public URL
-    encoded = urllib.parse.quote(image_prompt[:500])
-    seed = random.randint(1, 999999)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&seed={seed}&nologo=true"
-    logger.info("Image URL (Pollinations.ai): %s", url[:120] + "...")
-    return url
-
-
-# ---------------------------------------------------------------------------
 # Core task: Publish a new post
 # ---------------------------------------------------------------------------
 
+
 def run_post(current_state: dict) -> None:
-    """Choose a random mode and publish a Threads post."""
-    modes = brain.get_post_modes()
+    """Selects a random mode and publishes a post to Threads."""
+    modes = brain.get_post_modes()          # ["GAMING", "ANIME", "VALORANT", "IMAGE"]
     last_post_id = state.get_last_post_id(current_state)
 
-    # Every ~4th run (25% chance), do a quote post if we have a previous post
-    if last_post_id and random.random() < 0.25:
-        logger.info("Mode: QUOTE POST (quoting last thread %s)", last_post_id)
-        last_text = state.get_last_post_text(current_state)
-        # Generate a fresh gaming or anime post as the "reaction" to quote with
-        reaction_mode = random.choice(["gaming", "anime"])
-        if reaction_mode == "gaming":
-            reaction_text = brain.generate_gaming_post()
-        else:
-            reaction_text = brain.generate_anime_post()
+    post_id = None      # Always initialised -- prevents UnboundLocalError
+    post_text = ""
 
-        post_id = threads_client.post_quote(
-            text=reaction_text,
-            quote_post_id=last_post_id,
-        )
-        state.set_last_post(current_state, post_id, reaction_text)
-        logger.info("Quote post published: %s", post_id)
+    # Every ~4th run (25% chance), quote the last post if one exists
+    if last_post_id and random.random() < 0.25:
+        logger.info("Mode: QUOTE POST (quoting %s)", last_post_id)
+        reaction_mode = random.choice(["GAMING", "ANIME"])
+        if reaction_mode == "GAMING":
+            post_text = brain.generate_gaming_post()
+        else:
+            post_text = brain.generate_anime_post()
+
+        post_id = threads_client.post_quote(text=post_text, quote_post_id=last_post_id)
+        if post_id:
+            state.set_last_post(current_state, post_id, post_text)
+            logger.info("Quote post published: %s", post_id)
         return
 
-    # Standard random mode selection
-    mode = random.choice(modes)
-    logger.info("Mode selected: %s", mode.upper())
+    selected_mode = random.choice(modes)
+    logger.info("Mode selected: %s", selected_mode)
 
-    if mode == "gaming":
+    if selected_mode == "GAMING":
         post_text = brain.generate_gaming_post()
         logger.info("Publishing gaming post (%d chars)...", len(post_text))
         post_id = threads_client.post_text(post_text)
-        state.set_last_post(current_state, post_id, post_text)
 
-    elif mode == "anime":
+    elif selected_mode == "ANIME":
         post_text = brain.generate_anime_post()
         logger.info("Publishing anime post (%d chars)...", len(post_text))
         post_id = threads_client.post_text(post_text)
-        state.set_last_post(current_state, post_id, post_text)
 
-    elif mode == "valorant":
+    elif selected_mode == "VALORANT":
         post_text = brain.generate_valorant_post()
         logger.info("Publishing Valorant post (%d chars)...", len(post_text))
         post_id = threads_client.post_text(post_text)
+
+    elif selected_mode == "IMAGE":
+        img_payload = brain.generate_image_post()
+        post_text = img_payload["caption"]
+        logger.info("Publishing AI image post...")
+        post_id = threads_client.post_image(
+            image_url=img_payload["image_url"],
+            caption=post_text,
+        )
+
+    if post_id:
+        logger.info("Post published. Thread ID: %s", post_id)
         state.set_last_post(current_state, post_id, post_text)
-
-    elif mode == "image":
-        payload = brain.generate_image_post()
-        image_url = _get_image_url_from_prompt(payload["image_prompt"], payload["theme"])
-        logger.info("Publishing image post...")
-        post_id = threads_client.post_image(image_url, payload["caption"])
-        state.set_last_post(current_state, post_id, payload["caption"])
-
-    logger.info("Post published. Thread ID: %s", post_id)
+    else:
+        logger.warning("No post ID returned for mode: %s", selected_mode)
 
 
 # ---------------------------------------------------------------------------
 # Core task: Engagement Engine (reply to comments)
 # ---------------------------------------------------------------------------
 
+
 def run_engagement(current_state: dict) -> None:
     """Fetch recent thread replies and auto-respond using Gemini."""
     logger.info("Starting engagement engine...")
+    replies_made = 0
 
     try:
         recent_threads = threads_client.get_user_threads(limit=3)
@@ -141,8 +118,6 @@ def run_engagement(current_state: dict) -> None:
     if not recent_threads:
         logger.info("No threads found to process replies for.")
         return
-
-    total_replied = 0
 
     for thread in recent_threads:
         thread_id = thread.get("id")
@@ -159,48 +134,52 @@ def run_engagement(current_state: dict) -> None:
             logger.warning("Could not fetch replies for thread %s: %s", thread_id, exc)
             continue
 
-        for reply in replies:
-            reply_id = reply.get("id")
-            reply_text = reply.get("text", "").strip()
-            reply_username = reply.get("username", "unknown")
+        for rep in replies:
+            rep_id = rep.get("id")
+            rep_text = rep.get("text", "").strip()
+            rep_user = rep.get("username", "unknown")
 
-            if not reply_id or not reply_text:
+            if not rep_id or not rep_text:
                 continue
 
-            # Skip if already processed
-            if state.is_comment_processed(current_state, reply_id):
-                logger.debug("Already replied to comment %s, skipping.", reply_id)
+            if state.is_comment_processed(current_state, rep_id):
+                logger.debug("Already replied to %s, skipping.", rep_id)
                 continue
 
-            logger.info("Generating reply to @%s (comment: %s)...", reply_username, reply_id)
+            logger.info("Generating reply to @%s (comment %s)...", rep_user, rep_id)
 
             try:
-                reply_content = brain.generate_comment_reply(thread_text, reply_text)
+                reply_content = brain.analyze_and_reply(
+                    post_context=thread_text,
+                    comment_author=rep_user,
+                    comment_text=rep_text,
+                )
             except Exception as exc:
                 logger.warning("Brain failed to generate reply: %s", exc)
-                state.mark_comment_processed(current_state, reply_id)
+                state.mark_comment_processed(current_state, rep_id)
                 continue
 
             if reply_content is None:
-                logger.info("Skipping spam/irrelevant comment from @%s.", reply_username)
-                state.mark_comment_processed(current_state, reply_id)
+                logger.info("Skipping spam from @%s.", rep_user)
+                state.mark_comment_processed(current_state, rep_id)
                 continue
 
             try:
-                threads_client.reply_to_comment(reply_content, reply_to_id=reply_id)
-                state.mark_comment_processed(current_state, reply_id)
+                threads_client.reply_to_comment(reply_content, reply_to_id=rep_id)
+                state.mark_comment_processed(current_state, rep_id)
                 state.increment_replies(current_state)
-                total_replied += 1
-                logger.info("Replied to @%s: %s", reply_username, reply_content[:60])
+                replies_made += 1
+                logger.info("Replied to @%s: %s", rep_user, reply_content[:60])
             except Exception as exc:
-                logger.error("Failed to post reply to comment %s: %s", reply_id, exc)
+                logger.error("Failed to post reply to %s: %s", rep_id, exc)
 
-    logger.info("Engagement engine done. Replied to %d new comments.", total_replied)
+    logger.info("Engagement engine done. Replied to %d new comments.", replies_made)
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> int:
     """Main orchestrator. Returns exit code 0 on success, 1 on failure."""
@@ -208,36 +187,35 @@ def main() -> int:
     logger.info("Threads AI Bot starting...")
     logger.info("=" * 60)
 
-    # Validate required environment variables
     required_env = ["GEMINI_API_KEY", "THREADS_ACCESS_TOKEN"]
     missing = [k for k in required_env if not os.environ.get(k)]
     if missing:
         logger.error("Missing required environment variables: %s", ", ".join(missing))
-        logger.error("Please set them in .env (local) or GitHub Secrets (CI).")
         return 1
 
-    # Load persistent state
     current_state = state.load_state()
 
-    # Step 1: Publish a new post
+    # Check and refresh Threads token if eligible
+    threads_client.check_and_refresh_token(current_state)
+
+    # Publish post
     try:
         run_post(current_state)
     except Exception as exc:
         logger.error("Post publishing failed: %s", exc, exc_info=True)
-        # Do not exit -- still attempt engagement engine
 
-    # Step 2: Run engagement (reply to comments)
+    # Reply to comments
     try:
         run_engagement(current_state)
     except Exception as exc:
         logger.error("Engagement engine failed: %s", exc, exc_info=True)
 
-    # Save updated state
     state.save_state(current_state)
-
-    logger.info("Bot run complete. Stats: posts=%d, replies=%d",
-                current_state.get("total_posts_made", 0),
-                current_state.get("total_replies_made", 0))
+    logger.info(
+        "Bot run complete. posts=%d replies=%d",
+        current_state.get("total_posts_made", 0),
+        current_state.get("total_replies_made", 0),
+    )
     return 0
 
 
