@@ -1,266 +1,208 @@
 """
 app/brain.py
 ============
-Gemini AI Brain -- all content generation for the Threads bot.
-Model: gemini-2.5-flash
+Gemini AI Engine for conversational, human-like Threads posts and replies.
+Focuses on casual gaming/anime discussions, mini-reviews, hot takes, and debates.
 """
 
+import logging
 import os
 import random
-import logging
-import textwrap
 import time
-from typing import Optional
+import urllib.parse
+from typing import Dict, List, Optional
 
 import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Config
+# Gemini API Configuration
 # ---------------------------------------------------------------------------
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-MODEL_NAME = "gemini-3.6-flash"
-
-GAMING_SOURCES = [
-    "Elden Ring", "The Witcher 3", "God of War", "Dark Souls",
-    "Hollow Knight", "Sekiro", "Cyberpunk 2077", "Red Dead Redemption 2",
-    "Hades", "NieR: Automata",
-]
-
-ANIME_SOURCES = [
-    "Attack on Titan", "Vinland Saga", "Jujutsu Kaisen", "Demon Slayer",
-    "Hunter x Hunter", "Berserk", "Fullmetal Alchemist: Brotherhood",
-    "Chainsaw Man", "Frieren: Beyond Journey's End", "Blue Lock",
-]
-
-VALORANT_AGENTS = [
-    "Jett", "Reyna", "Sage", "Omen", "Killjoy", "Cypher", "Viper",
-    "Chamber", "Neon", "Iso", "Clove", "Tejo", "Vyse",
-]
-
-IMAGE_THEMES = [
-    "dark fantasy warrior from an Elden Ring-inspired world",
-    "a samurai anime protagonist standing against a blood-red moon",
-    "a futuristic Valorant agent in a neon-lit cyberpunk cityscape",
-    "a lone anime traveler walking through ruins of a fallen civilization",
-    "a god of war emerging from the depths of a glowing abyss",
-    "a hunter from the world of Berserk facing a demonic creature",
-]
-
-HASHTAG_SETS = {
-    "gaming": "#Gaming #GamingQuotes #EldenRing #GodOfWar #Witcher #GamePhilosophy #NightOwlGamer",
-    "anime": "#Anime #AnimeQuotes #AttackOnTitan #JJK #VinlandSaga #AnimeWisdom #DemonSlayer",
-    "valorant": "#Valorant #VCT #VALORANT #EsportsNews #FPS #ValorantLore #PROScene",
-    "image": "#AIArt #GamingArt #AnimeArt #ConceptArt #DigitalArt #AIGenerated #ThreadsArt",
-}
-
-# ---------------------------------------------------------------------------
-# Gemini helpers
-# ---------------------------------------------------------------------------
-
-
-def _get_model() -> genai.GenerativeModel:
-    """Configure and return a Gemini GenerativeModel instance."""
+if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-    return genai.GenerativeModel(MODEL_NAME)
+
+# Use the latest flash model
+MODEL_NAME = "gemini-2.5-flash"
 
 
-def _safe_generate(model: genai.GenerativeModel, prompt: str, retries: int = 3) -> str:
-    """Call Gemini with exponential-backoff retry on transient errors."""
-    for attempt in range(retries):
+def get_post_modes() -> List[str]:
+    """Available post modes."""
+    return ["HOT_TAKE", "MINI_REVIEW", "QUESTION_DEBATE", "IMAGE_THOUGHT"]
+
+
+def _get_model():
+    return genai.GenerativeModel(
+        MODEL_NAME,
+        generation_config={
+            "temperature": 0.95,  # Higher temperature gives more creative, casual variety
+            "top_p": 0.95,
+            "max_output_tokens": 300,
+        },
+    )
+
+
+def _safe_generate(prompt: str, max_retries: int = 3) -> str:
+    """Executes a prompt through Gemini with retry backoff."""
+    model = _get_model()
+    for attempt in range(1, max_retries + 1):
         try:
             response = model.generate_content(prompt)
-            return response.text.strip()
+            if response and response.text:
+                return response.text.strip().strip('"')
+            raise RuntimeError("Empty response from Gemini.")
         except Exception as exc:
-            wait = 2 ** attempt
             logger.warning(
-                "Gemini error (attempt %d/%d): %s -- retrying in %ds",
-                attempt + 1, retries, exc, wait,
+                "Gemini generation error (attempt %d/%d): %s",
+                attempt,
+                max_retries,
+                exc,
             )
-            time.sleep(wait)
-    raise RuntimeError("Gemini API failed after %d retries." % retries)
+            if attempt < max_retries:
+                time.sleep(2**attempt)
+            else:
+                raise RuntimeError(f"Gemini API failed after {max_retries} attempts: {exc}")
 
 
-def _trim(text: str, limit: int) -> str:
-    """Trim text to character limit at a word boundary."""
-    if len(text) <= limit:
-        return text
-    trimmed = text[:limit].rsplit(" ", 1)[0]
-    return trimmed.rstrip(",.;:") + "..."
-
-
-# ---------------------------------------------------------------------------
-# Post mode registry
-# ---------------------------------------------------------------------------
-
-
-def get_post_modes() -> list:
-    """Return all available post mode identifiers."""
-    return ["GAMING", "ANIME", "VALORANT", "IMAGE"]
+def _clean_for_threads(text: str) -> str:
+    """Cleans up markdown quotes and limits length to fit Threads."""
+    text = text.strip().strip('"').strip("'")
+    if len(text) > 490:
+        text = text[:485] + "..."
+    return text
 
 
 # ---------------------------------------------------------------------------
-# Mode A -- Gaming Quotes
+# Human-Style Content Generators
 # ---------------------------------------------------------------------------
+
+
+def generate_hot_take_post() -> str:
+    """Generates an opinionated, casual hot take to drive comments."""
+    prompt = (
+        "Write a short, casual Threads post giving a slightly controversial hot take "
+        "about modern gaming, anime, or gaming habits (e.g. Elden Ring vs casual open worlds, "
+        "anime pacing, overpriced game remakes, live-service fatigue, or ranked tilt).\n\n"
+        "Writing Guidelines:\n"
+        "- Write like a real 20-something gamer on Threads/Twitter, NOT an AI or marketer.\n"
+        "- Casual, punchy tone. You can use lowercase openings or informal cadence.\n"
+        "- NO generic quotes, NO corporate motivational talk.\n"
+        "- End with a short punchline or an invitation to disagree (e.g. 'tell me I'm wrong', 'or is it just me?').\n"
+        "- Max 1 relevant hashtag or NO hashtags at all (real people rarely spam hashtags).\n"
+        "- Under 280 characters total."
+    )
+    return _clean_for_threads(_safe_generate(prompt))
+
+
+def generate_mini_review_post() -> str:
+    """Generates a raw, personal mini-review of a game or anime."""
+    prompt = (
+        "Write a realistic, 2-3 sentence personal mini-review of a specific game or anime "
+        "(e.g. Cyberpunk 2077, Vinland Saga, Monster, Witcher 3, Sekiro, Jujutsu Kaisen, or Valorant).\n\n"
+        "Writing Guidelines:\n"
+        "- Start naturally like: 'Just finished...', 'Replaying X and...', or 'Still thinking about...'.\n"
+        "- Mention one very specific detail (soundtrack, an emotional scene, a frustrating boss/mechanic).\n"
+        "- Give an honest rating or final impression (e.g. 'solid 8/10', 'overhyped but fun', 'genuinely peak fiction').\n"
+        "- Zero corporate speak. Do NOT use emojis like 🚀, 🤖, or 🌟.\n"
+        "- Under 300 characters total."
+    )
+    return _clean_for_threads(_safe_generate(prompt))
+
+
+def generate_question_debate_post() -> str:
+    """Generates an engaging question to make people reply and argue in the comments."""
+    prompt = (
+        "Write an engaging, casual question/debate prompt for gamers and anime fans on Threads.\n\n"
+        "Topic Ideas:\n"
+        "- 'What's a game you loved as a kid that aged horribly?'\n"
+        "- 'Name an anime where the villain was actually 100% right.'\n"
+        "- 'Valorant solo queue: what agent pick instantly makes you think you lost?'\n"
+        "- 'A single game mechanic that instantly ruins the experience for you?'\n\n"
+        "Writing Guidelines:\n"
+        "- Keep it short, blunt, and super conversational (1-2 sentences).\n"
+        "- Make it easy and tempting for someone scrolling by to drop a 1-word or 1-sentence reply.\n"
+        "- NO hashtags, NO emojis, natural lowercase or normal punctuation.\n"
+        "- Under 200 characters total."
+    )
+    return _clean_for_threads(_safe_generate(prompt))
 
 
 def generate_gaming_post() -> str:
-    source = random.choice(GAMING_SOURCES)
-    model = _get_model()
-    prompt = textwrap.dedent(f"""
-        You are a gaming philosopher with a deep, authentic voice.
-        Create ONE original quote or philosophical insight inspired by the game: {source}.
-        Rules:
-        - Maximum 320 characters.
-        - Do NOT start with "Quote:" or any label.
-        - Sound authentic, poetic, or punchy.
-        - Do NOT add hashtags.
-        - Do NOT use quotation marks around the full text.
-        Output ONLY the quote/insight text.
-    """).strip()
-    text = _safe_generate(model, prompt)
-    return f"{_trim(text, 320)}\n\n{HASHTAG_SETS['gaming']}"
-
-
-# ---------------------------------------------------------------------------
-# Mode B -- Anime Quotes
-# ---------------------------------------------------------------------------
+    """Alias for backwards compatibility with main orchestrator."""
+    return generate_hot_take_post()
 
 
 def generate_anime_post() -> str:
-    source = random.choice(ANIME_SOURCES)
-    model = _get_model()
-    prompt = textwrap.dedent(f"""
-        You are an anime philosopher and content creator.
-        Create ONE original quote or deep thought inspired by: {source}.
-        Rules:
-        - Maximum 320 characters.
-        - Sound authentic, emotional, or thought-provoking.
-        - Do NOT add hashtags.
-        - Do NOT start with any label.
-        Output ONLY the quote/thought text.
-    """).strip()
-    text = _safe_generate(model, prompt)
-    return f"{_trim(text, 320)}\n\n{HASHTAG_SETS['anime']}"
-
-
-# ---------------------------------------------------------------------------
-# Mode C -- Valorant Meta & Lore
-# ---------------------------------------------------------------------------
+    """Alias for backwards compatibility with main orchestrator."""
+    return generate_mini_review_post()
 
 
 def generate_valorant_post() -> str:
-    agent = random.choice(VALORANT_AGENTS)
-    post_type = random.choice(["meta_tip", "patch_humor", "lore_snippet", "vct_hype"])
-    model = _get_model()
-
-    instructions = {
-        "meta_tip": f"Write a sharp, practical META tip for playing {agent} effectively. Max 280 chars.",
-        "patch_humor": f"Write a funny, relatable take on a Valorant patch change affecting {agent}. Max 280 chars.",
-        "lore_snippet": f"Share an intriguing lore fact about {agent} from the Valorant universe. Max 280 chars.",
-        "vct_hype": "Write hype commentary about the Valorant Champions Tour (VCT) pro scene. Max 280 chars.",
-    }
-
-    prompt = textwrap.dedent(f"""
-        You are a Valorant content creator with expert game knowledge.
-        {instructions[post_type]}
-        Rules:
-        - Punchy, engaging, authentic to the Valorant community.
-        - Do NOT add hashtags.
-        Output ONLY the post text.
-    """).strip()
-    text = _safe_generate(model, prompt)
-    return f"{_trim(text, 320)}\n\n{HASHTAG_SETS['valorant']}"
+    """Alias for backwards compatibility with main orchestrator."""
+    return generate_question_debate_post()
 
 
 # ---------------------------------------------------------------------------
-# Mode D -- AI Image Post
+# AI Image Post Generator (Watermark-Free + Casual Caption)
 # ---------------------------------------------------------------------------
 
 
-def generate_image_post() -> dict:
-    """
-    Returns:
-        dict with keys: 'caption', 'image_prompt', 'image_url', 'theme'
-        image_url is built from Pollinations.ai (free, public, no auth required).
-    """
-    import urllib.parse
+def generate_image_post() -> Dict[str, str]:
+    """Generates an aesthetic image prompt and a casual, human-like caption."""
+    concept_prompt = (
+        "Write a 1-sentence prompt for a moody, aesthetic, cinematic concept art "
+        "(e.g., dark cyber-room with blue ambient glow, lone knight under a shattered moon, "
+        "or rainy anime street at midnight). Output ONLY the visual prompt."
+    )
+    visual_description = _safe_generate(concept_prompt)
 
-    theme = random.choice(IMAGE_THEMES)
-    model = _get_model()
-
-    caption_prompt = textwrap.dedent(f"""
-        Write a short, captivating caption for an AI-generated image of: {theme}.
-        Maximum 260 characters. Evoke emotion, mystery, or awe.
-        Do NOT add hashtags. Output ONLY the caption text.
-    """).strip()
-
-    image_prompt_text = textwrap.dedent(f"""
-        Write a detailed, vivid image generation prompt for: {theme}.
-        Include lighting style, mood, color palette, artistic style (e.g., digital painting, cinematic),
-        and character details. Max 150 words. Output ONLY the image prompt.
-    """).strip()
-
-    caption = _trim(_safe_generate(model, caption_prompt), 260)
-    img_prompt = _safe_generate(model, image_prompt_text)
-
-    import random as _random
-    seed = _random.randint(1, 999999)
-    encoded = urllib.parse.quote(img_prompt[:500])
+    seed = random.randint(1000, 999999)
+    encoded_prompt = urllib.parse.quote(visual_description)
     image_url = (
-        f"https://image.pollinations.ai/prompt/{encoded}"
-        f"?width=1024&height=1024&seed={seed}&nologo=true"
+        f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+        f"?width=1080&height=1080&seed={seed}&nologo=true"
     )
 
+    caption_prompt = (
+        f"Write a very casual 1-sentence Threads caption for this picture: '{visual_description}'.\n"
+        "Do NOT describe what's in the picture like a robot. Write a mood or thought, "
+        "like: 'current aesthetic', 'need this vibe irl', or 'late night thoughts'.\n"
+        "Max 100 characters. No cringe hashtags."
+    )
+    caption = _clean_for_threads(_safe_generate(caption_prompt))
+
     return {
-        "caption": f"{caption}\n\n{HASHTAG_SETS['image']}",
-        "image_prompt": img_prompt,
         "image_url": image_url,
-        "theme": theme,
+        "caption": caption,
     }
 
 
 # ---------------------------------------------------------------------------
-# Comment reply (called by engagement engine in main.py)
+# Engagement & Replies Brain
 # ---------------------------------------------------------------------------
-
-
-def generate_comment_reply(post_text: str, comment_text: str) -> Optional[str]:
-    """
-    Generate a witty, short reply to a comment.
-    Returns None if the comment is spam/irrelevant.
-    """
-    model = _get_model()
-
-    spam_prompt = textwrap.dedent(f"""
-        Is this comment spam, a bot reply, or completely irrelevant gibberish?
-        Comment: "{comment_text}"
-        Answer with ONLY "SPAM" or "OK". Nothing else.
-    """).strip()
-
-    verdict = _safe_generate(model, spam_prompt).upper().strip()
-    if "SPAM" in verdict:
-        logger.info("Comment flagged as spam: %s", comment_text[:60])
-        return None
-
-    reply_prompt = textwrap.dedent(f"""
-        You are a witty, authentic social media personality.
-        Your post: "{post_text[:200]}"
-        Comment received: "{comment_text}"
-        Write a reply that is:
-        - 1-2 sentences MAX (under 120 characters total).
-        - Witty, warm, or thought-provoking -- never robotic.
-        - Contextually relevant.
-        - Natural human tone.
-        Output ONLY the reply text.
-    """).strip()
-
-    reply = _safe_generate(model, reply_prompt)
-    return _trim(reply, 120)
 
 
 def analyze_and_reply(post_context: str, comment_author: str, comment_text: str) -> Optional[str]:
-    """Alias used by main.py engagement engine."""
-    return generate_comment_reply(post_context, comment_text)
+    """Generates authentic, short peer-to-peer replies to comments."""
+    spam_check_prompt = (
+        f"Classify if the following comment is spam, self-promotion, or a bot comment.\n"
+        f"Comment: '{comment_text}'\n"
+        "Reply strictly with either 'SPAM' or 'VALID'."
+    )
+    classification = _safe_generate(spam_check_prompt).upper()
+    if "SPAM" in classification:
+        logger.info("Comment by @%s classified as SPAM. Skipping.", comment_author)
+        return None
+
+    reply_prompt = (
+        f"Context post: '{post_context}'\n"
+        f"User @{comment_author} replied: '{comment_text}'\n\n"
+        "Write a quick, authentic reply (1 short sentence, max 15 words).\n"
+        "- Reply like a friend texting back (e.g., 'honestly valid', 'nah you're tripping', 'first playthrough was wild').\n"
+        "- NO customer-support tone, NO 'Thanks for sharing!', NO hashtags.\n"
+        "- Keep it super natural and casual."
+    )
+    reply_text = _safe_generate(reply_prompt)
+    return _clean_for_threads(reply_text)
